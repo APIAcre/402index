@@ -224,6 +224,8 @@ router.get('/digest', async (req, res) => {
         by_protocol: byProtocol,
         by_health: byHealth,
         payment_verified: paymentVerified,
+        // The key is kept for existing readers; the count is x402 rows whose 402 challenge parsed.
+        payment_verified_means: '402 header parsed',
         domain_verified_providers: domainVerifiedProviders,
         l402_format_counts: l402FormatCounts,
         l402_compliant_count: l402CompliantCount,
