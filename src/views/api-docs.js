@@ -42,7 +42,7 @@ export function apiDocsPage() {
               <tr><td>max_price_usd</td><td>number</td><td>Maximum price in USD</td></tr>
               <tr><td>payment_asset</td><td>string</td><td>Filter by payment asset (e.g. <code>BTC</code>, <code>USDC</code>)</td></tr>
               <tr><td>payment_valid</td><td>boolean</td><td>Only x402 services with verified payment requirements: <code>true</code></td></tr>
-              <tr><td>verified</td><td>boolean</td><td>Only payment-verified services. x402: valid payment headers. L402/MPP: healthy endpoint. Domain-verified services ranked first. Recommended for agents. Example: <code>?verified=true</code></td></tr>
+              <tr><td>verified</td><td>boolean</td><td>Only services whose 402 header parsed (not proof a payment settles). x402: valid payment headers. L402/MPP: healthy endpoint. Domain-verified services ranked first. Recommended for agents. Example: <code>?verified=true</code></td></tr>
               <tr><td>l402_format</td><td>string</td><td>Filter L402 endpoints by macaroon format: <code>v2_tlv</code>, <code>v1_binary</code>, <code>v0_text</code>, <code>json</code>, <code>unknown</code></td></tr>
               <tr><td>lnget_compatible</td><td>boolean</td><td>Filter L402 endpoints by <code>lnget</code> client compatibility: <code>true</code> or <code>false</code></td></tr>
               <tr><td>sort</td><td>string</td><td>Sort by: <code>name</code>, <code>price</code>, <code>latency</code>, <code>uptime</code>, <code>reliability</code></td></tr>
@@ -59,8 +59,8 @@ export function apiDocsPage() {
             </thead>
             <tbody>
               <tr><td>Domain Verified</td><td><code>domain_verified=1</code></td><td>Provider proved ownership via .well-known DNS challenge. Ranked first in results.</td></tr>
-              <tr><td>Payment Verified (x402)</td><td><code>x402_payment_valid=1</code></td><td>Endpoint returns spec-compliant 402 headers with valid payment requirements.</td></tr>
-              <tr><td>Payment Verified (L402/MPP)</td><td><code>health_status='healthy'</code></td><td>Endpoint responds with valid payment challenge.</td></tr>
+              <tr><td>402 header parsed (x402)</td><td><code>x402_payment_valid=1</code></td><td>Endpoint returns spec-compliant 402 headers with valid payment requirements.</td></tr>
+              <tr><td>402 header parsed (L402/MPP)</td><td><code>health_status='healthy'</code></td><td>Endpoint responds with valid payment challenge.</td></tr>
             </tbody>
           </table>
           <p>Example: <code>GET /api/v1/services?q=weather&amp;verified=true</code></p>
