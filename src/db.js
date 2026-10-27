@@ -626,8 +626,9 @@ db.exec(`
 `)
 
 // ─── Vector KNN index ────────────────────────────────────────────────────────
-// service_embeddings holds the authoritative float32 BLOBs. vec_service_embeddings
-// is the sqlite-vec index the search path actually queries.
+// vec_service_embeddings is the only vector store and the index the search path queries.
+// service_embeddings (float32 BLOB copies) is no longer written as of 2026-10-27; the table
+// stays so old handles and the purge path keep working, and it is emptied out of band.
 //
 // Until 2026-07-25 this table was created only inside test/queries-hybrid.test.js.
 // Production never had it, so every semantic search threw `no such table`, the bare
@@ -706,9 +707,11 @@ export function hasVecIndex(database = db) {
 export function getVecIndexStats(database = db) {
   const stats = { available: SQLITE_VEC_AVAILABLE, embeddings: 0, indexed: 0 }
   try {
-    stats.embeddings = database.prepare('SELECT COUNT(*) AS c FROM service_embeddings').get().c
+    // One store since 2026-10-27: service_embeddings is no longer written, so both counters
+    // come from the vec index. embeddings is kept for /health readers that compare the two.
     if (hasVecIndex(database)) {
       stats.indexed = database.prepare('SELECT COUNT(*) AS c FROM vec_service_embeddings').get().c
+      stats.embeddings = stats.indexed
     }
   } catch (err) {
     console.warn(`[db] getVecIndexStats failed: ${err.message}`)

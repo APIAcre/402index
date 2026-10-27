@@ -74,7 +74,7 @@ export function apiDocsPage() {
             <li><strong>Tier D:</strong> Cosine similarity from embeddings (intent matching)</li>
             <li><strong>Tier E:</strong> Default order (featured, verified, category, health, name)</li>
           </ol>
-          <p>If the embedding service is unavailable, results fall back to LIKE-only and the response includes an <code>X-402index-Search-Degraded</code> header with a reason code: <code>no-api-key</code>, <code>embed-timeout</code>, <code>embed-error</code>, <code>circuit-open</code>, <code>vec-deadline</code>, or <code>js-fallback-too-large</code>.</p>
+          <p>If the embedding service is unavailable, results fall back to LIKE-only and the response includes an <code>X-402index-Search-Degraded</code> header with a reason code: <code>no-api-key</code>, <code>embed-timeout</code>, <code>embed-error</code>, <code>circuit-open</code>, <code>vec-deadline</code>, or <code>vec-unavailable</code>.</p>
 
           <div class="example-block"><button class="copy-btn" onclick="copyExample(this)">Copy</button>GET /api/v1/services?protocol=l402&amp;health=healthy</div>
         </div>
