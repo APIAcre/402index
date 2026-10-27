@@ -6,6 +6,7 @@ import { createRequire } from 'module'
 import { createHash } from 'crypto'
 import { ensureQueryLogDaily, rollupQueryLog, QUERY_LOG_RETENTION_DAYS } from './services/query-log-rollup.js'
 import { ensureQuarantineSchema } from './services/visibility.js'
+import { ensureBazaarPresenceSchema } from './aggregators/bazaar-presence.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 export const DB_PATH = process.env.DB_PATH || join(__dirname, '..', 'data', '402index.db')
@@ -911,6 +912,7 @@ db.exec(`
 `)
 ensureQueryLogDaily(db)
 ensureQuarantineSchema(db)
+ensureBazaarPresenceSchema(db)
 
 // Migration: add degraded_reason column for hybrid search degradation tracking
 try {

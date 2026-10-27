@@ -4,6 +4,7 @@ import { extractHostname } from '../../services/url-normalize.js'
 import { getSnapshots } from '../../services/daily-snapshot.js'
 import { getQueueDepth, getCircuitState, getQueryEmbeddingCacheStats } from '../../services/embeddings.js'
 import { LISTED, countQuarantined } from '../../services/visibility.js'
+import { bazaarDrift } from '../../aggregators/bazaar-presence.js'
 
 const router = Router()
 
@@ -49,6 +50,7 @@ router.get('/health', (req, res) => {
     const excludedTemplates = db.prepare('SELECT COUNT(*) as c FROM services WHERE is_template = 1').get().c
     const excludedDemos = db.prepare('SELECT COUNT(*) as c FROM services WHERE is_demo = 1').get().c
     const excludedQuarantined = countQuarantined(db)
+    const drift = bazaarDrift(db)
 
     const lastBazaarSync = db.prepare(
       "SELECT MAX(updated_at) as t FROM services WHERE source = 'bazaar'"
@@ -79,6 +81,8 @@ router.get('/health', (req, res) => {
       excluded_templates: excludedTemplates,
       excluded_demos: excludedDemos,
       excluded_quarantined: excludedQuarantined,
+      excluded_retired: drift.retired,
+      bazaar: { upstream_total: drift.upstream_total, upstream_missing: drift.upstream_missing, last_complete_pass: drift.last_complete_pass, last_complete_pass_at: drift.last_complete_pass_at },
       by_protocol: Object.fromEntries(
         Object.entries(byProtocol).map(([proto, endpoints]) => [proto, {
           endpoints,
