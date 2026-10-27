@@ -10,6 +10,7 @@ import { detectProtocol, getPrimaryDetection } from '../services/detect-protocol
 import { probeEndpoint } from '../services/probe-endpoint.js'
 import { LISTED } from '../services/visibility.js'
 import { evaluateQuarantine } from './quarantine.js'
+import { recordSchedulerEvent } from '../services/scheduler-events.js'
 
 const TIMEOUT_MS = 5000
 const CONCURRENCY = 10
@@ -887,6 +888,7 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
 
     if (usedPct > 90) {
       console.warn(`[health] CRITICAL: Disk ${usedPct.toFixed(1)}% full — emergency prune (1 day retention), skipping run`)
+      recordSchedulerEvent(database, { job: 'health', event: 'skipped', reason: 'disk-guard', detail: `Disk ${usedPct.toFixed(1)}% full (>90%, emergency prune)` })
       try {
         const result = database.prepare(
           "DELETE FROM health_checks WHERE checked_at < datetime('now', '-1 day')"
@@ -902,6 +904,7 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
 
     if (usedPct > 80) {
       console.warn(`[health] WARNING: Disk ${usedPct.toFixed(1)}% full — skipping health check run`)
+      recordSchedulerEvent(database, { job: 'health', event: 'skipped', reason: 'disk-guard', detail: `Disk ${usedPct.toFixed(1)}% full (>80%)` })
       return 'skip'
     }
 
@@ -911,6 +914,7 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
     // statfs failure and must not stop health checks from running.
     if (err.code === 'SQLITE_FULL' || /disk is full/i.test(err.message || '')) {
       console.error(`[health] Disk full while checking space: ${err.message} — skipping run`)
+      recordSchedulerEvent(database, { job: 'health', event: 'skipped', reason: 'disk-full', detail: err.message })
       return 'skip'
     }
     console.warn(`[health] Could not check disk space: ${err.message} — continuing anyway`)
@@ -922,9 +926,9 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
  * Run health checks for all services (prunes old records first).
  * @returns {Promise<{healthy: number, degraded: number, down: number, unknown: number, error: number}>} Counts by status
  */
-export async function runHealthChecks() {
+export async function runHealthChecks({ checkDisk = checkDiskSpace } = {}) {
   // Check disk space — skip run if volume is too full
-  const diskCheck = await checkDiskSpace()
+  const diskCheck = await checkDisk()
   if (diskCheck === 'skip') {
     return { healthy: 0, degraded: 0, down: 0, unknown: 0, error: 0 }
   }
@@ -992,7 +996,11 @@ export async function runHealthChecks() {
   }
 
   const durationSec = ((Date.now() - startTime) / 1000).toFixed(1)
-  console.log(`[health] Done in ${durationSec}s. healthy=${results.healthy} degraded=${results.degraded} down=${results.down} unknown=${results.unknown}`)
+  // File size and freelist on every run: the trend that would have warned before the disk guard tripped.
+  const dbBytes = db.pragma('page_count', { simple: true }) * db.pragma('page_size', { simple: true })
+  const freelist = db.pragma('freelist_count', { simple: true })
+  console.log(`[health] Done in ${durationSec}s. healthy=${results.healthy} degraded=${results.degraded} down=${results.down} unknown=${results.unknown} db_bytes=${dbBytes} freelist=${freelist}`)
+  recordSchedulerEvent(db, { job: 'health', event: 'completed', detail: JSON.stringify({ duration_s: Number(durationSec), checked, ...results, db_bytes: dbBytes, freelist }) })
 
   // Per-protocol breakdown
   for (const [proto, counts] of Object.entries(byProtocol)) {

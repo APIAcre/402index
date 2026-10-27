@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { mcpAllTime } from '../../services/query-log-rollup.js'
+import { healthRuns24h } from '../../services/scheduler-events.js'
 import db from '../../db.js'
 import { LISTED } from '../../services/visibility.js'
 
@@ -168,6 +169,8 @@ router.get('/digest', (req, res) => {
 
     res.json({
       generated_at: new Date().toISOString(),
+      // "N health runs skipped in 24h, reason": a stalled checker must show up here, not only in logs.
+      health_runs: healthRuns24h(db),
       totals: {
         endpoints: totalEndpoints,
         providers: providerSet.size,
