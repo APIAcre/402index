@@ -20,6 +20,7 @@ import { ACTIVE, QUARANTINE_ENABLED } from '../services/visibility.js'
 export const SAMPLE = 5
 export const ENTER = 3
 export const EXIT = 3
+export const MIN_GAP_MINUTES = 45
 const HOST_CONCURRENCY = 16
 const MIN_ROWS = 5
 
@@ -35,11 +36,19 @@ const ok = s => s === 402 || (s >= 200 && s < 300)
  * @param {object} database
  * @param {{ probe?: (url: string, method?: string, body?: string) => Promise<number|null> }} [opts]
  */
-export async function evaluateQuarantine(database, { probe = defaultProbe } = {}) {
+export async function evaluateQuarantine(database, { probe = defaultProbe, minGapMinutes = MIN_GAP_MINUTES } = {}) {
   if (!QUARANTINE_ENABLED) return { evaluated: 0 }
 
-  const tracked = database.prepare('SELECT * FROM quarantined_hosts').all()
-  const known = new Set(tracked.map(t => t.hostname))
+  // A host's streak advances at most once per MIN_GAP_MINUTES. Runs start at every boot, and on
+  // 2026-10-27 three deploys in 25 minutes walked 102 hosts through "3 failing runs" — the rule
+  // means three sweeps, roughly three hours of evidence.
+  const tracked = database.prepare(
+    `SELECT * FROM quarantined_hosts WHERE last_probe_at IS NULL OR last_probe_at <= datetime('now', ?)`
+  ).all(`-${minGapMinutes} minutes`)
+  const recentlyProbed = database.prepare(
+    `SELECT hostname FROM quarantined_hosts WHERE last_probe_at > datetime('now', ?)`
+  ).all(`-${minGapMinutes} minutes`).map(r => r.hostname)
+  const known = new Set([...tracked.map(t => t.hostname), ...recentlyProbed])
   // A host whose rows the sweep has driven down and none of which answers healthy. Uses the
   // sweep's own verdicts, so a host only becomes a candidate after the sweep has seen it fail.
   const candidates = database.prepare(`

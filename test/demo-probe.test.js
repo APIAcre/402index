@@ -254,7 +254,10 @@ describe('health checker service filter (regression guard)', () => {
         x402_payment_valid INTEGER,
         status TEXT DEFAULT 'active',
         provider_deleted INTEGER DEFAULT 0,
-        probe_status TEXT DEFAULT 'probeable'
+        probe_status TEXT DEFAULT 'probeable',
+        source TEXT DEFAULT 'test',
+        domain_verified INTEGER DEFAULT 0,
+        last_checked TEXT
       )
     `)
     withQuarantineSchema(db)

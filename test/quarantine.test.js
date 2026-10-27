@@ -32,34 +32,34 @@ describe('evaluateQuarantine state machine', () => {
   it(`a host whose apex and sampled rows answer 530 is quarantined on the ${ENTER}rd failing run, not before`, async () => {
     addRows(db, 'dead.example', 8)
     for (let run = 1; run < ENTER; run++) {
-      await evaluateQuarantine(db, { probe: always(530) })
+      await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(530) })
       assert.equal(state(db, 'dead.example').state, 'watch', `run ${run} must only watch`)
     }
-    const r = await evaluateQuarantine(db, { probe: always(530) })
+    const r = await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(530) })
     assert.deepEqual(r.entered, ['dead.example'])
     assert.equal(state(db, 'dead.example').state, 'quarantined')
   })
 
   it('network errors count as failures; one 402 in the probe set keeps a watched host out', async () => {
     addRows(db, 'flaky.example', 6)
-    await evaluateQuarantine(db, { probe: always(null) })
+    await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(null) })
     assert.equal(state(db, 'flaky.example').fail_streak, 1)
     let n = 0
-    await evaluateQuarantine(db, { probe: async () => (n++ === 3 ? 402 : 530) })
+    await evaluateQuarantine(db, { minGapMinutes: 0, probe: async () => (n++ === 3 ? 402 : 530) })
     assert.equal(state(db, 'flaky.example'), undefined, 'a watched host that answers 402 is dropped')
   })
 
   it(`a quarantined host is released only after ${EXIT} consecutive runs with a 402`, async () => {
     addRows(db, 'back.example', 6)
     db.prepare("INSERT INTO quarantined_hosts (hostname, state, fail_streak, seeded) VALUES ('back.example', 'quarantined', 3, 1)").run()
-    await evaluateQuarantine(db, { probe: always(402) })
-    await evaluateQuarantine(db, { probe: always(402) })
+    await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(402) })
+    await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(402) })
     assert.equal(state(db, 'back.example').pass_streak, 2)
-    await evaluateQuarantine(db, { probe: always(530) })
+    await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(530) })
     assert.equal(state(db, 'back.example').pass_streak, 0, 'a failing run resets the streak')
-    for (let i = 0; i < EXIT - 1; i++) await evaluateQuarantine(db, { probe: always(402) })
+    for (let i = 0; i < EXIT - 1; i++) await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(402) })
     assert.equal(state(db, 'back.example').state, 'quarantined')
-    const r = await evaluateQuarantine(db, { probe: always(402) })
+    const r = await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(402) })
     assert.deepEqual(r.released, ['back.example'])
     assert.equal(state(db, 'back.example'), undefined)
   })
@@ -68,7 +68,7 @@ describe('evaluateQuarantine state machine', () => {
     addRows(db, 'mixed.example', 6)
     db.prepare("UPDATE services SET health_status = 'healthy' WHERE id = 'mixed.example-0'").run()
     addRows(db, 'tiny.example', 2)
-    const r = await evaluateQuarantine(db, { probe: always(530) })
+    const r = await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(530) })
     assert.equal(r.evaluated, 0)
   })
 })
@@ -150,9 +150,24 @@ describe('evaluateQuarantine runs hosts concurrently', () => {
     for (let i = 0; i < 40; i++) addRows(db, `slow${i}.example`, 5)
     const slow = async () => { await new Promise(r => setTimeout(r, 100)); return 530 }
     const t = Date.now()
-    const r = await evaluateQuarantine(db, { probe: slow })
+    const r = await evaluateQuarantine(db, { minGapMinutes: 0, probe: slow })
     const ms = Date.now() - t
     assert.equal(r.evaluated, 40)
     assert.ok(ms < 6000, `took ${ms} ms; a serial pass is ~24 s`)
+  })
+})
+
+describe('evaluateQuarantine counts at most one run per host per 45 minutes', () => {
+  it('back-to-back runs (e.g. three deploys in 25 minutes) advance a host once', async () => {
+    const db = unitDb()
+    addRows(db, 'redeploy.example', 6)
+    await evaluateQuarantine(db, { probe: always(530) })
+    await evaluateQuarantine(db, { probe: always(530) })
+    await evaluateQuarantine(db, { probe: always(530) })
+    assert.equal(state(db, 'redeploy.example').state, 'watch')
+    assert.equal(state(db, 'redeploy.example').fail_streak, 1)
+    db.prepare("UPDATE quarantined_hosts SET last_probe_at = datetime('now', '-50 minutes')").run()
+    await evaluateQuarantine(db, { probe: always(530) })
+    assert.equal(state(db, 'redeploy.example').fail_streak, 2)
   })
 })
