@@ -483,6 +483,9 @@ function persistHealthResult(serviceId, { checkStatus, healthStatus, httpStatus,
       console.warn(`[health] Service ${serviceId} was deleted during check — skipping persist`)
       return
     }
+    // Name the raw HTTP status: a status the CHECK enum rejects (e.g. 406 → not_acceptable,
+    // #309/#313) otherwise surfaces only as a generic sweep error with no status attached.
+    console.error(`[health] could not store check for ${serviceId}: status=${checkStatus} http=${httpStatus ?? 'none'}: ${err.message}`)
     throw err
   }
 }
