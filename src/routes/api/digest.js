@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { mcpAllTime } from '../../services/query-log-rollup.js'
 import db from '../../db.js'
 
 const router = Router()
@@ -97,10 +98,8 @@ router.get('/digest', (req, res) => {
       "SELECT COUNT(*) as c FROM query_log WHERE timestamp > date('now') AND user_agent LIKE '%402index-mcp%'"
     ).get().c
 
-    const mcpSummary = db.prepare(
-      `SELECT COUNT(*) as total, COUNT(DISTINCT date(timestamp)) as activeDays
-       FROM query_log WHERE user_agent LIKE '%402index-mcp%'`
-    ).get()
+    // Raw rows are kept 30 days; older ones live in query_log_daily (see query-log-rollup.js).
+    const mcpSummary = mcpAllTime(db)
 
     // ── Search Intelligence ──
     const topSearches = db.prepare(
