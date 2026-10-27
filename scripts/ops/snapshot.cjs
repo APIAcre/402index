@@ -22,6 +22,9 @@ const SRC = process.env.DB_PATH || '/data/402index.db'
 const DST = `/tmp/${name}.db`
 if (DST.startsWith('/data')) throw new Error('refusing to snapshot onto /data')
 
+// Warm the page cache first. On a fresh container the locked copy ran at ~300 MB/s and held
+// SHARED for 12.7 s (two app logQuery writes failed "database is locked"); warm, it is ~2 GB/s.
+execFileSync('sh', ['-c', `cat "${SRC}" > /dev/null`])
 const src = new Database(SRC, { readonly: true, fileMustExist: true })
 src.pragma('busy_timeout = 5000')
 const t0 = Date.now()
