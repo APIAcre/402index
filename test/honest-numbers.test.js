@@ -65,3 +65,16 @@ describe('registrations.last_7d_count counts registrations', () => {
     assert.equal(after - before, 2)
   })
 })
+
+describe('the digest shows what it excludes', () => {
+  it('totals carries excluded_quarantined, excluded_retired and bazaar_upstream_missing, matching /api/v1/health', async () => {
+    add('honest-ret', 'bazaar', 'retired')
+    const health = await (await fetch(`${BASE}/api/v1/health`)).json()
+    const d = await (await fetch(`${BASE}/api/v1/digest`, { headers: DIGEST })).json()
+    assert.equal(d.totals.excluded_quarantined, health.excluded_quarantined)
+    assert.equal(d.totals.excluded_retired, health.excluded_retired)
+    assert.ok(d.totals.excluded_retired >= 1)
+    assert.equal(d.totals.bazaar_upstream_missing, health.bazaar.upstream_missing)
+    assert.equal(d.totals.bazaar_upstream_total, health.bazaar.upstream_total)
+  })
+})
