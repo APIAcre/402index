@@ -1,5 +1,8 @@
 import { Router } from 'express'
+import { mcpAllTime } from '../../services/query-log-rollup.js'
+import { healthRuns24h } from '../../services/scheduler-events.js'
 import db from '../../db.js'
+import { LISTED } from '../../services/visibility.js'
 
 const router = Router()
 
@@ -16,7 +19,7 @@ function classifyAgent(ua) {
 
 router.get('/digest', (req, res) => {
   try {
-    const ACTIVE = "(status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL)"
+    const ACTIVE = LISTED
 
     // ── Totals ──
     const totalEndpoints = db.prepare(`SELECT COUNT(*) as c FROM services WHERE ${ACTIVE}`).get().c
@@ -97,10 +100,8 @@ router.get('/digest', (req, res) => {
       "SELECT COUNT(*) as c FROM query_log WHERE timestamp > date('now') AND user_agent LIKE '%402index-mcp%'"
     ).get().c
 
-    const mcpSummary = db.prepare(
-      `SELECT COUNT(*) as total, COUNT(DISTINCT date(timestamp)) as activeDays
-       FROM query_log WHERE user_agent LIKE '%402index-mcp%'`
-    ).get()
+    // Raw rows are kept 30 days; older ones live in query_log_daily (see query-log-rollup.js).
+    const mcpSummary = mcpAllTime(db)
 
     // ── Search Intelligence ──
     const topSearches = db.prepare(
@@ -168,6 +169,8 @@ router.get('/digest', (req, res) => {
 
     res.json({
       generated_at: new Date().toISOString(),
+      // "N health runs skipped in 24h, reason": a stalled checker must show up here, not only in logs.
+      health_runs: healthRuns24h(db),
       totals: {
         endpoints: totalEndpoints,
         providers: providerSet.size,

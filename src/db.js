@@ -4,6 +4,10 @@ import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { createRequire } from 'module'
 import { createHash } from 'crypto'
+import { ensureQueryLogDaily, rollupQueryLog, QUERY_LOG_RETENTION_DAYS } from './services/query-log-rollup.js'
+import { ensureQuarantineSchema } from './services/visibility.js'
+import { ensureBazaarPresenceSchema } from './aggregators/bazaar-presence.js'
+import { ensureSchedulerEvents, pruneSchedulerEvents } from './services/scheduler-events.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 export const DB_PATH = process.env.DB_PATH || join(__dirname, '..', 'data', '402index.db')
@@ -907,6 +911,10 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);
 `)
+ensureQueryLogDaily(db)
+ensureQuarantineSchema(db)
+ensureBazaarPresenceSchema(db)
+ensureSchedulerEvents(db)
 
 // Migration: add degraded_reason column for hybrid search degradation tracking
 try {
@@ -928,18 +936,30 @@ export function logQuery({ queryText = null, filters = null, resultCount = null,
   }
 }
 
-export function pruneQueryLog(retentionDays = 90) {
+/**
+ * Fold query_log rows older than 30 days into query_log_daily (src/services/query-log-rollup.js).
+ * Bounded to 10 chunks of 20k rows per call so one hourly run stays short; a backlog drains
+ * over successive runs or through scripts/ops/rollup-query-log.mjs.
+ */
+export function pruneQueryLog() {
   try {
-    const result = db.prepare(
-      "DELETE FROM query_log WHERE timestamp < datetime('now', '-' || ? || ' days')"
-    ).run(retentionDays)
-    if (result.changes > 0) {
-      console.log(`[db] Pruned ${result.changes} query log entries older than ${retentionDays} days`)
-      db.pragma('incremental_vacuum')
+    const { rolled } = rollupQueryLog(db, { maxChunks: 10 })
+    if (rolled > 0) {
+      console.log(`[db] Rolled up ${rolled} query log entries older than ${QUERY_LOG_RETENTION_DAYS} days into query_log_daily`)
+      drainFreelist(db)
     }
   } catch (err) {
-    console.warn(`[db] Query log prune failed: ${err.message}`)
+    console.warn(`[db] Query log rollup failed: ${err.message}`)
   }
+}
+
+/**
+ * Hand free pages back to the filesystem 1,000 pages (~4 MB) per transaction. One unbounded
+ * incremental_vacuum after a large delete is a single big transaction, and in journal_mode=delete
+ * its rollback journal needs disk the volume may not have.
+ */
+export function drainFreelist(database = db, pages = 1000) {
+  while (database.pragma('freelist_count', { simple: true }) > 0) database.pragma(`incremental_vacuum(${pages})`)
 }
 
 // ─── Pruning ────────────────────────────────────────────────────────────────
@@ -1016,14 +1036,17 @@ function pruneRegistrationAttempts() {
   }
 }
 
-function pruneAll() {
+function pruneAll({ boot = false } = {}) {
   pruneHealthChecks()
-  pruneQueryLog()
+  // Not at boot: a deploy must never start deleting query_log rows before an operator has
+  // taken a snapshot, and boot work delays the listener (the site 502s until it is up).
+  if (!boot) pruneQueryLog()
   purgeSoftDeleted()
   pruneRegistrationAttempts()
+  try { pruneSchedulerEvents(db) } catch (err) { console.warn(`[db] Scheduler events prune failed: ${err.message}`) }
 }
 
-pruneAll()
+pruneAll({ boot: true })
 setInterval(pruneAll, 60 * 60 * 1000).unref()
 
 // Disk usage diagnostics

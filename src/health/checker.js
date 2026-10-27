@@ -8,6 +8,9 @@ import { parseWwwAuthenticate, isValidMacaroon, isValidInvoice } from '../servic
 import { parsePaymentRequired, parsePaymentRequiredBody, validatePaymentRequirements } from '../services/x402-utils.js'
 import { detectProtocol, getPrimaryDetection } from '../services/detect-protocol.js'
 import { probeEndpoint } from '../services/probe-endpoint.js'
+import { LISTED } from '../services/visibility.js'
+import { evaluateQuarantine } from './quarantine.js'
+import { recordSchedulerEvent } from '../services/scheduler-events.js'
 
 const TIMEOUT_MS = 5000
 const CONCURRENCY = 10
@@ -94,7 +97,9 @@ function stmt(key, sql) {
   return stmts[key]
 }
 
-const getServices = () => stmt('getServices', "SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid FROM services WHERE (status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL) AND (probe_status = 'probeable' OR probe_status IS NULL)")
+// Quarantined hosts are excluded (LISTED): evaluateQuarantine() probes them once per run instead.
+export const SWEEP_SQL = `SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid FROM services WHERE ${LISTED} AND (probe_status = 'probeable' OR probe_status IS NULL)`
+const getServices = () => stmt('getServices', SWEEP_SQL)
 
 const insertHealthCheck = () => stmt('insertHealthCheck', `
   INSERT INTO health_checks (service_id, status, response_time_ms, http_status, error_message)
@@ -483,6 +488,9 @@ function persistHealthResult(serviceId, { checkStatus, healthStatus, httpStatus,
       console.warn(`[health] Service ${serviceId} was deleted during check — skipping persist`)
       return
     }
+    // Name the raw HTTP status: a status the CHECK enum rejects (e.g. 406 → not_acceptable,
+    // #309/#313) otherwise surfaces only as a generic sweep error with no status attached.
+    console.error(`[health] could not store check for ${serviceId}: status=${checkStatus} http=${httpStatus ?? 'none'}: ${err.message}`)
     throw err
   }
 }
@@ -648,6 +656,11 @@ export function detectProtocolChanges(url, serviceId, protocol, allDetections, h
 }
 
 const getSiblings = () => stmt('getSiblings', "SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid, probe_status FROM services WHERE url = ? AND id != ? AND (status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL)")
+
+/** Rows the sweep will check: listed (so not on a quarantined host) and probeable. */
+export function sweepCandidates() {
+  return getServices().all()
+}
 
 /** Check a single service: HTTP probe, classify result, persist. */
 export async function checkService(service) {
@@ -875,6 +888,7 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
 
     if (usedPct > 90) {
       console.warn(`[health] CRITICAL: Disk ${usedPct.toFixed(1)}% full — emergency prune (1 day retention), skipping run`)
+      recordSchedulerEvent(database, { job: 'health', event: 'skipped', reason: 'disk-guard', detail: `Disk ${usedPct.toFixed(1)}% full (>90%, emergency prune)` })
       try {
         const result = database.prepare(
           "DELETE FROM health_checks WHERE checked_at < datetime('now', '-1 day')"
@@ -890,6 +904,7 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
 
     if (usedPct > 80) {
       console.warn(`[health] WARNING: Disk ${usedPct.toFixed(1)}% full — skipping health check run`)
+      recordSchedulerEvent(database, { job: 'health', event: 'skipped', reason: 'disk-guard', detail: `Disk ${usedPct.toFixed(1)}% full (>80%)` })
       return 'skip'
     }
 
@@ -899,6 +914,7 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
     // statfs failure and must not stop health checks from running.
     if (err.code === 'SQLITE_FULL' || /disk is full/i.test(err.message || '')) {
       console.error(`[health] Disk full while checking space: ${err.message} — skipping run`)
+      recordSchedulerEvent(database, { job: 'health', event: 'skipped', reason: 'disk-full', detail: err.message })
       return 'skip'
     }
     console.warn(`[health] Could not check disk space: ${err.message} — continuing anyway`)
@@ -910,15 +926,23 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
  * Run health checks for all services (prunes old records first).
  * @returns {Promise<{healthy: number, degraded: number, down: number, unknown: number, error: number}>} Counts by status
  */
-export async function runHealthChecks() {
+export async function runHealthChecks({ checkDisk = checkDiskSpace } = {}) {
   // Check disk space — skip run if volume is too full
-  const diskCheck = await checkDiskSpace()
+  const diskCheck = await checkDisk()
   if (diskCheck === 'skip') {
     return { healthy: 0, degraded: 0, down: 0, unknown: 0, error: 0 }
   }
 
   // Prune old records before running new checks
   pruneOldHealthChecks()
+
+  // Host-level quarantine before the sweep, so a host that enters quarantine this run is
+  // already out of the list below. Never lets a quarantine bug stop health checks.
+  try {
+    await evaluateQuarantine(db)
+  } catch (err) {
+    console.warn(`[quarantine] evaluation failed: ${err.message}`)
+  }
 
   // Reset per-cycle state
   hostLastProbe.clear()
@@ -972,7 +996,11 @@ export async function runHealthChecks() {
   }
 
   const durationSec = ((Date.now() - startTime) / 1000).toFixed(1)
-  console.log(`[health] Done in ${durationSec}s. healthy=${results.healthy} degraded=${results.degraded} down=${results.down} unknown=${results.unknown}`)
+  // File size and freelist on every run: the trend that would have warned before the disk guard tripped.
+  const dbBytes = db.pragma('page_count', { simple: true }) * db.pragma('page_size', { simple: true })
+  const freelist = db.pragma('freelist_count', { simple: true })
+  console.log(`[health] Done in ${durationSec}s. healthy=${results.healthy} degraded=${results.degraded} down=${results.down} unknown=${results.unknown} db_bytes=${dbBytes} freelist=${freelist}`)
+  recordSchedulerEvent(db, { job: 'health', event: 'completed', detail: JSON.stringify({ duration_s: Number(durationSec), checked, ...results, db_bytes: dbBytes, freelist }) })
 
   // Per-protocol breakdown
   for (const [proto, counts] of Object.entries(byProtocol)) {
