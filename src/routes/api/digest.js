@@ -119,9 +119,12 @@ router.get('/digest', async (req, res) => {
       ORDER BY registered_at DESC
     `).all()
 
+    // POST /register answers 201 for every new registration, pending ones included. Poller
+    // imports (Bazaar, MPP, ...) used to be counted here too, which made "registrations" track
+    // upstream churn instead of providers coming to us.
     const last7dCount = db.prepare(`
       SELECT COUNT(*) as c FROM services
-      WHERE registered_at > datetime('now', '-7 days') AND ${ACTIVE}
+      WHERE registered_at > datetime('now', '-7 days') AND source LIKE '%self-registered%'
     `).get().c
 
     const pendingApproval = db.prepare("SELECT COUNT(*) as c FROM services WHERE status = 'pending'").get().c
