@@ -13,7 +13,12 @@ import { evaluateQuarantine } from './quarantine.js'
 import { recordSchedulerEvent } from '../services/scheduler-events.js'
 
 const TIMEOUT_MS = 5000
-const CONCURRENCY = 10
+// Sweep shape (2026-10-27). A pool of workers rather than lock-step batches, so one dead row
+// (~10 s of timeouts) no longer stalls nine live ones; per-host politeness (waitForHost) is
+// unchanged. Each sweep stops starting checks after its budget so it fits the hourly interval;
+// whatever it did not reach is first in line next time (orderForSweep).
+const CONCURRENCY = parseInt(process.env.HEALTH_SWEEP_CONCURRENCY) || 32
+const SWEEP_BUDGET_MS = parseInt(process.env.HEALTH_SWEEP_BUDGET_MS) || 50 * 60 * 1000
 const HEALTH_CHECK_RETENTION_DAYS = 3
 
 /**
@@ -98,7 +103,7 @@ function stmt(key, sql) {
 }
 
 // Quarantined hosts are excluded (LISTED): evaluateQuarantine() probes them once per run instead.
-export const SWEEP_SQL = `SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid FROM services WHERE ${LISTED} AND (probe_status = 'probeable' OR probe_status IS NULL)`
+export const SWEEP_SQL = `SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid, source, domain_verified, last_checked, hostname FROM services WHERE ${LISTED} AND (probe_status = 'probeable' OR probe_status IS NULL)`
 const getServices = () => stmt('getServices', SWEEP_SQL)
 
 const insertHealthCheck = () => stmt('insertHealthCheck', `
@@ -657,6 +662,34 @@ export function detectProtocolChanges(url, serviceId, protocol, allDetections, h
 
 const getSiblings = () => stmt('getSiblings', "SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid, probe_status FROM services WHERE url = ? AND id != ? AND (status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL)")
 
+/**
+ * Sweep order: self-registered and domain-verified rows first (providers who came to us), then
+ * the longest-unchecked (never-checked first). Within that order, rows are dealt round-robin by
+ * host so the workers spread across hosts instead of queueing on one host's per-host delay.
+ */
+export function orderForSweep(rows) {
+  const tier = r => ((r.source || '').includes('self-registered') || r.domain_verified === 1 ? 0 : 1)
+  const sorted = [...rows].sort((a, b) =>
+    tier(a) - tier(b) ||
+    (a.last_checked === b.last_checked ? 0 : a.last_checked == null ? -1 : b.last_checked == null ? 1 : a.last_checked < b.last_checked ? -1 : 1))
+  const out = []
+  for (const t of [0, 1]) {
+    const byHost = new Map()
+    for (const r of sorted) {
+      if (tier(r) !== t) continue
+      const h = r.hostname || r.url
+      if (!byHost.has(h)) byHost.set(h, [])
+      byHost.get(h).push(r)
+    }
+    // Deal hosts in order of their most overdue row, one row per host per round.
+    const queues = [...byHost.values()]
+    for (let round = 0; queues.some(q => q.length > round); round++) {
+      for (const q of queues) if (q.length > round) out.push(q[round])
+    }
+  }
+  return out
+}
+
 /** Rows the sweep will check: listed (so not on a quarantined host) and probeable. */
 export function sweepCandidates() {
   return getServices().all()
@@ -926,7 +959,7 @@ export async function checkDiskSpace({ statfsFn = statfs, database = db } = {}) 
  * Run health checks for all services (prunes old records first).
  * @returns {Promise<{healthy: number, degraded: number, down: number, unknown: number, error: number}>} Counts by status
  */
-export async function runHealthChecks({ checkDisk = checkDiskSpace } = {}) {
+export async function runHealthChecks({ checkDisk = checkDiskSpace, evaluate = evaluateQuarantine, check = checkService, budgetMs = SWEEP_BUDGET_MS, concurrency = CONCURRENCY } = {}) {
   // Check disk space — skip run if volume is too full
   const diskCheck = await checkDisk()
   if (diskCheck === 'skip') {
@@ -939,7 +972,7 @@ export async function runHealthChecks({ checkDisk = checkDiskSpace } = {}) {
   // Host-level quarantine before the sweep, so a host that enters quarantine this run is
   // already out of the list below. Never lets a quarantine bug stop health checks.
   try {
-    await evaluateQuarantine(db)
+    await evaluate(db)
   } catch (err) {
     console.warn(`[quarantine] evaluation failed: ${err.message}`)
   }
@@ -948,51 +981,51 @@ export async function runHealthChecks({ checkDisk = checkDiskSpace } = {}) {
   hostLastProbe.clear()
   checkedThisCycle.clear()
 
-  // Shuffle to distribute same-host endpoints across the full check cycle
-  const services = shuffleArray(getServices().all())
-  console.log(`[health] Checking ${services.length} services...`)
+  const services = orderForSweep(getServices().all())
+  console.log(`[health] Checking ${services.length} services (budget ${Math.round(budgetMs / 60000)} min, ${concurrency} workers)...`)
 
   const results = { healthy: 0, degraded: 0, down: 0, unknown: 0, error: 0, skipped: 0 }
   const byProtocol = {}
   const errors = []
   let checked = 0
+  let next = 0
   const startTime = Date.now()
 
-  // Process in batches for concurrency control
-  for (let i = 0; i < services.length; i += CONCURRENCY) {
-    const batch = services.slice(i, i + CONCURRENCY)
-    const batchResults = await Promise.allSettled(
-      batch.map(s => checkService(s))
-    )
-
-    for (let j = 0; j < batchResults.length; j++) {
-      checked++
-      const result = batchResults[j]
-      const service = batch[j]
-      const proto = service.protocol || 'unknown'
-
-      if (!byProtocol[proto]) byProtocol[proto] = { healthy: 0, degraded: 0, down: 0, unknown: 0, error: 0 }
-
-      if (result.status === 'fulfilled') {
-        const status = result.value.healthStatus
-        if (status === 'skipped') {
-          results.skipped++
-        } else {
-          results[status] = (results[status] || 0) + 1
-          byProtocol[proto][status] = (byProtocol[proto][status] || 0) + 1
-        }
+  function tally(service, outcome) {
+    checked++
+    const proto = service.protocol || 'unknown'
+    if (!byProtocol[proto]) byProtocol[proto] = { healthy: 0, degraded: 0, down: 0, unknown: 0, error: 0 }
+    if (outcome.status === 'fulfilled') {
+      const status = outcome.value.healthStatus
+      if (status === 'skipped') {
+        results.skipped++
       } else {
-        results.error++
-        byProtocol[proto].error++
-        if (errors.length < 10) {
-          errors.push({ url: service.url, protocol: proto, error: result.reason?.message || 'unknown' })
-        }
+        results[status] = (results[status] || 0) + 1
+        byProtocol[proto][status] = (byProtocol[proto][status] || 0) + 1
+      }
+    } else {
+      results.error++
+      byProtocol[proto].error++
+      if (errors.length < 10) errors.push({ url: service.url, protocol: proto, error: outcome.reason?.message || 'unknown' })
+    }
+    if (checked % 500 === 0) console.log(`[health] Progress: ${checked}/${services.length}`)
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, services.length) }, async () => {
+    while (next < services.length && Date.now() - startTime < budgetMs) {
+      const service = services[next++]
+      try {
+        tally(service, { status: 'fulfilled', value: await check(service) })
+      } catch (reason) {
+        tally(service, { status: 'rejected', reason })
       }
     }
+  }))
 
-    if (checked % 500 === 0 || checked === services.length) {
-      console.log(`[health] Progress: ${checked}/${services.length}`)
-    }
+  const skippedBudget = services.length - next
+  if (skippedBudget > 0) {
+    const firstSkipped = services[next]
+    console.log(`[health] Budget: checked ${checked} of ${services.length} in ${((Date.now() - startTime) / 1000).toFixed(0)}s, skipped ${skippedBudget} (budget ${Math.round(budgetMs / 1000)}s reached); next up last_checked=${firstSkipped.last_checked ?? 'never'}`)
   }
 
   const durationSec = ((Date.now() - startTime) / 1000).toFixed(1)
@@ -1000,7 +1033,7 @@ export async function runHealthChecks({ checkDisk = checkDiskSpace } = {}) {
   const dbBytes = db.pragma('page_count', { simple: true }) * db.pragma('page_size', { simple: true })
   const freelist = db.pragma('freelist_count', { simple: true })
   console.log(`[health] Done in ${durationSec}s. healthy=${results.healthy} degraded=${results.degraded} down=${results.down} unknown=${results.unknown} db_bytes=${dbBytes} freelist=${freelist}`)
-  recordSchedulerEvent(db, { job: 'health', event: 'completed', detail: JSON.stringify({ duration_s: Number(durationSec), checked, ...results, db_bytes: dbBytes, freelist }) })
+  recordSchedulerEvent(db, { job: 'health', event: 'completed', detail: JSON.stringify({ duration_s: Number(durationSec), checked, skipped_budget: skippedBudget, total: services.length, ...results, db_bytes: dbBytes, freelist }) })
 
   // Per-protocol breakdown
   for (const [proto, counts] of Object.entries(byProtocol)) {
