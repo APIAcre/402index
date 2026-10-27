@@ -2,7 +2,8 @@ import { Router } from 'express'
 import { mcpAllTime } from '../../services/query-log-rollup.js'
 import { healthRuns24h } from '../../services/scheduler-events.js'
 import db from '../../db.js'
-import { LISTED } from '../../services/visibility.js'
+import { LISTED, countQuarantined } from '../../services/visibility.js'
+import { bazaarDrift } from '../../aggregators/bazaar-presence.js'
 import { getProvider } from '../../services/l402-provider.js'
 
 const router = Router()
@@ -229,6 +230,16 @@ router.get('/digest', async (req, res) => {
         payment_verified: paymentVerified,
         // The key is kept for existing readers; the count is x402 rows whose 402 challenge parsed.
         payment_verified_means: '402 header parsed',
+        // What the totals leave out, so a drop in endpoints can be read without /api/v1/health.
+        ...(() => {
+          const drift = bazaarDrift(db)
+          return {
+            excluded_quarantined: countQuarantined(db),
+            excluded_retired: drift.retired,
+            bazaar_upstream_total: drift.upstream_total,
+            bazaar_upstream_missing: drift.upstream_missing,
+          }
+        })(),
         domain_verified_providers: domainVerifiedProviders,
         l402_format_counts: l402FormatCounts,
         l402_compliant_count: l402CompliantCount,
