@@ -143,3 +143,16 @@ describe('QUARANTINE_ENABLED=false', () => {
     assert.deepEqual(JSON.parse(out.trim()), { enabled: false, listed: true })
   })
 })
+
+describe('evaluateQuarantine runs hosts concurrently', () => {
+  it('40 tracked hosts with 100 ms probes finish well under the 40 × 6 × 100 ms a serial pass would take', async () => {
+    const db = unitDb()
+    for (let i = 0; i < 40; i++) addRows(db, `slow${i}.example`, 5)
+    const slow = async () => { await new Promise(r => setTimeout(r, 100)); return 530 }
+    const t = Date.now()
+    const r = await evaluateQuarantine(db, { probe: slow })
+    const ms = Date.now() - t
+    assert.equal(r.evaluated, 40)
+    assert.ok(ms < 6000, `took ${ms} ms; a serial pass is ~24 s`)
+  })
+})

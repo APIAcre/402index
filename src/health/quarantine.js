@@ -20,6 +20,7 @@ import { ACTIVE, QUARANTINE_ENABLED } from '../services/visibility.js'
 export const SAMPLE = 5
 export const ENTER = 3
 export const EXIT = 3
+const HOST_CONCURRENCY = 16
 const MIN_ROWS = 5
 
 async function defaultProbe(url, method, body) {
@@ -62,7 +63,10 @@ export async function evaluateQuarantine(database, { probe = defaultProbe } = {}
   const summary = { evaluated: 0, entered: [], released: [], watching: 0, quarantined: 0 }
   const hosts = [...tracked, ...candidates.map(h => ({ hostname: h, state: null, fail_streak: 0, pass_streak: 0, entered_at: null }))]
 
-  for (const host of hosts) {
+  // Hosts are independent, so probe up to HOST_CONCURRENCY of them at once: on 2026-10-27 the
+  // first run found 386 candidate hosts, and probing them one by one held the sweep ~20 min.
+  // A host's own probes stay sequential. State writes are synchronous, so workers never interleave.
+  async function evaluateHost(host) {
     const targets = [{ url: `https://${host.hostname}/`, http_method: 'GET', probe_body: null }, ...sampleRows.all(host.hostname)]
     const statuses = []
     for (const t of targets) {
@@ -85,12 +89,12 @@ export async function evaluateQuarantine(database, { probe = defaultProbe } = {}
           pass_streak: streak, entered_at: host.entered_at, last_http_status: last, reason })
         summary.quarantined++
       }
-      continue
+      return
     }
 
     if (!fails) {
       if (host.state === 'watch') drop.run(host.hostname)
-      continue
+      return
     }
     const streak = host.fail_streak + 1
     if (streak >= ENTER) {
@@ -104,6 +108,10 @@ export async function evaluateQuarantine(database, { probe = defaultProbe } = {}
       summary.watching++
     }
   }
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(HOST_CONCURRENCY, hosts.length) }, async () => {
+    while (next < hosts.length) await evaluateHost(hosts[next++])
+  }))
   if (summary.evaluated > 0) console.log(`[quarantine] evaluated ${summary.evaluated} hosts: quarantined=${summary.quarantined} watching=${summary.watching} entered=${summary.entered.length} released=${summary.released.length}`)
   return summary
 }
