@@ -8,6 +8,8 @@ import { parseWwwAuthenticate, isValidMacaroon, isValidInvoice } from '../servic
 import { parsePaymentRequired, parsePaymentRequiredBody, validatePaymentRequirements } from '../services/x402-utils.js'
 import { detectProtocol, getPrimaryDetection } from '../services/detect-protocol.js'
 import { probeEndpoint } from '../services/probe-endpoint.js'
+import { LISTED } from '../services/visibility.js'
+import { evaluateQuarantine } from './quarantine.js'
 
 const TIMEOUT_MS = 5000
 const CONCURRENCY = 10
@@ -94,7 +96,9 @@ function stmt(key, sql) {
   return stmts[key]
 }
 
-const getServices = () => stmt('getServices', "SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid FROM services WHERE (status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL) AND (probe_status = 'probeable' OR probe_status IS NULL)")
+// Quarantined hosts are excluded (LISTED): evaluateQuarantine() probes them once per run instead.
+export const SWEEP_SQL = `SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid FROM services WHERE ${LISTED} AND (probe_status = 'probeable' OR probe_status IS NULL)`
+const getServices = () => stmt('getServices', SWEEP_SQL)
 
 const insertHealthCheck = () => stmt('insertHealthCheck', `
   INSERT INTO health_checks (service_id, status, response_time_ms, http_status, error_message)
@@ -652,6 +656,11 @@ export function detectProtocolChanges(url, serviceId, protocol, allDetections, h
 
 const getSiblings = () => stmt('getSiblings', "SELECT id, url, protocol, http_method, probe_body, latency_p50_ms, consecutive_failures, consecutive_latency_spikes, registered_at, x402_payment_valid, probe_status FROM services WHERE url = ? AND id != ? AND (status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL)")
 
+/** Rows the sweep will check: listed (so not on a quarantined host) and probeable. */
+export function sweepCandidates() {
+  return getServices().all()
+}
+
 /** Check a single service: HTTP probe, classify result, persist. */
 export async function checkService(service) {
   const { id, url, protocol, http_method, probe_body, latency_p50_ms: historicalP50, consecutive_failures: prevFailures, consecutive_latency_spikes: prevLatencySpikes, x402_payment_valid: currentPaymentValid } = service
@@ -922,6 +931,14 @@ export async function runHealthChecks() {
 
   // Prune old records before running new checks
   pruneOldHealthChecks()
+
+  // Host-level quarantine before the sweep, so a host that enters quarantine this run is
+  // already out of the list below. Never lets a quarantine bug stop health checks.
+  try {
+    await evaluateQuarantine(db)
+  } catch (err) {
+    console.warn(`[quarantine] evaluation failed: ${err.message}`)
+  }
 
   // Reset per-cycle state
   hostLastProbe.clear()

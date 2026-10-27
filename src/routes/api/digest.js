@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { mcpAllTime } from '../../services/query-log-rollup.js'
 import db from '../../db.js'
+import { LISTED } from '../../services/visibility.js'
 
 const router = Router()
 
@@ -17,7 +18,7 @@ function classifyAgent(ua) {
 
 router.get('/digest', (req, res) => {
   try {
-    const ACTIVE = "(status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL)"
+    const ACTIVE = LISTED
 
     // ── Totals ──
     const totalEndpoints = db.prepare(`SELECT COUNT(*) as c FROM services WHERE ${ACTIVE}`).get().c

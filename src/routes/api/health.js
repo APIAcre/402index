@@ -3,12 +3,13 @@ import db, { getVecIndexStats } from '../../db.js'
 import { extractHostname } from '../../services/url-normalize.js'
 import { getSnapshots } from '../../services/daily-snapshot.js'
 import { getQueueDepth, getCircuitState, getQueryEmbeddingCacheStats } from '../../services/embeddings.js'
+import { LISTED, countQuarantined } from '../../services/visibility.js'
 
 const router = Router()
 
 router.get('/health', (req, res) => {
   try {
-    const ACTIVE_FILTER = "WHERE (status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL)"
+    const ACTIVE_FILTER = `WHERE ${LISTED}`
 
     const total = db.prepare(`SELECT COUNT(*) as c FROM services ${ACTIVE_FILTER}`).get().c
 
@@ -47,6 +48,7 @@ router.get('/health', (req, res) => {
 
     const excludedTemplates = db.prepare('SELECT COUNT(*) as c FROM services WHERE is_template = 1').get().c
     const excludedDemos = db.prepare('SELECT COUNT(*) as c FROM services WHERE is_demo = 1').get().c
+    const excludedQuarantined = countQuarantined(db)
 
     const lastBazaarSync = db.prepare(
       "SELECT MAX(updated_at) as t FROM services WHERE source = 'bazaar'"
@@ -76,6 +78,7 @@ router.get('/health', (req, res) => {
       distinct_providers: filteredProviders.total.size,
       excluded_templates: excludedTemplates,
       excluded_demos: excludedDemos,
+      excluded_quarantined: excludedQuarantined,
       by_protocol: Object.fromEntries(
         Object.entries(byProtocol).map(([proto, endpoints]) => [proto, {
           endpoints,
@@ -138,8 +141,7 @@ router.get('/categories', (req, res) => {
     const rows = db.prepare(
       `SELECT category, protocol, COUNT(*) as count
        FROM services
-       WHERE (status = 'active' OR status IS NULL)
-         AND (provider_deleted = 0 OR provider_deleted IS NULL)
+       WHERE ${LISTED}
          AND category IS NOT NULL
          AND is_template = 0 AND is_demo = 0
        GROUP BY category, protocol

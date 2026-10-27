@@ -1,4 +1,5 @@
 import { SQLITE_VEC_AVAILABLE } from '../db.js'
+import { ACTIVE, LISTED } from '../services/visibility.js'
 
 // Replicates SQLite's default NOCASE collation: folds only ASCII A-Z → a-z.
 // Non-ASCII characters (accented letters, etc.) are left untouched, matching
@@ -68,6 +69,7 @@ export function buildServiceQuery(opts = {}) {
     order,
     rawLimit,
     rawOffset,
+    quarantined,
   } = opts
 
   // Fix: use nullish coalescing to handle limit=0 correctly (0 is falsy but valid input)
@@ -77,7 +79,8 @@ export function buildServiceQuery(opts = {}) {
   const parsedOffset = parseInt(rawOffset)
   const offset = Math.max(Number.isNaN(parsedOffset) ? 0 : parsedOffset, 0)
 
-  const conditions = ["(status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL)"]
+  // quarantined=true opts back in to rows on quarantined hosts (src/services/visibility.js).
+  const conditions = [quarantined === true || quarantined === 'true' ? ACTIVE : LISTED]
   const params = {}
 
   if (protocol) {
