@@ -59,9 +59,11 @@ describe('evaluateQuarantine state machine', () => {
     assert.equal(state(db, 'back.example').pass_streak, 0, 'a failing run resets the streak')
     for (let i = 0; i < EXIT - 1; i++) await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(402) })
     assert.equal(state(db, 'back.example').state, 'quarantined')
+    // Since 2026-10-28 the streak must also span 24 h (test/quarantine-hysteresis.test.js).
+    db.prepare("UPDATE quarantined_hosts SET first_pass_at = datetime('now', '-25 hours')").run()
     const r = await evaluateQuarantine(db, { minGapMinutes: 0, probe: always(402) })
     assert.deepEqual(r.released, ['back.example'])
-    assert.equal(state(db, 'back.example'), undefined)
+    assert.equal(state(db, 'back.example').state, 'released', 'kept as released for flap detection')
   })
 
   it('hosts with any healthy row, or too few down rows, are not candidates', async () => {
