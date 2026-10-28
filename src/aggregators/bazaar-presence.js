@@ -91,10 +91,14 @@ export function completePass(database, upstreamTotal) {
 /** Numbers for /api/v1/health. */
 export function bazaarDrift(database) {
   const last = database.prepare('SELECT pass_id, completed_at, upstream_total, seen FROM bazaar_passes WHERE complete = 1 ORDER BY pass_id DESC LIMIT 1').get()
+  // bazaar.js writes the offset after every page, so its updated_at is the last page processed.
+  const offset = database.prepare("SELECT value, updated_at FROM sync_state WHERE key = 'bazaar_offset'").get()
   return {
     upstream_total: last?.upstream_total ?? null,
     last_complete_pass: last?.pass_id ?? null,
     last_complete_pass_at: last?.completed_at ?? null,
+    last_page_processed_at: offset?.updated_at ?? null,
+    offset: offset ? Number(offset.value) : null,
     upstream_missing: database.prepare("SELECT COUNT(*) AS c FROM services WHERE source = 'bazaar' AND (status = 'active' OR status IS NULL) AND (provider_deleted = 0 OR provider_deleted IS NULL) AND upstream_missing_since IS NOT NULL").get().c,
     retired: database.prepare("SELECT COUNT(*) AS c FROM services WHERE status = 'retired'").get().c,
   }

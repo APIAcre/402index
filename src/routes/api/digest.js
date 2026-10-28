@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { mcpAllTime } from '../../services/query-log-rollup.js'
 import { healthRuns24h } from '../../services/scheduler-events.js'
 import db from '../../db.js'
-import { LISTED, countQuarantined } from '../../services/visibility.js'
+import { LISTED, countQuarantined, quarantineSummary } from '../../services/visibility.js'
 import { bazaarDrift } from '../../aggregators/bazaar-presence.js'
 import { getProvider } from '../../services/l402-provider.js'
 
@@ -222,6 +222,16 @@ router.get('/digest', async (req, res) => {
       generated_at: new Date().toISOString(),
       // "N health runs skipped in 24h, reason": a stalled checker must show up here, not only in logs.
       health_runs: healthRuns24h(db),
+      // Hosts out of the counts and what moved in the last 24 h (2026-10-28: one 77k-row host
+      // leaving quarantine doubled totals.endpoints overnight).
+      quarantine: quarantineSummary(db),
+      // Bazaar poll freshness. last_page_processed_at is when the poller last stored an offset;
+      // a stale value with no pass completing is the silent hang in #370.
+      bazaar: (() => {
+        const d = bazaarDrift(db)
+        return { upstream_total: d.upstream_total, upstream_missing: d.upstream_missing, last_page_processed_at: d.last_page_processed_at,
+          offset: d.offset, last_complete_pass: d.last_complete_pass, last_complete_pass_at: d.last_complete_pass_at }
+      })(),
       totals: {
         endpoints: totalEndpoints,
         providers: providerSet.size,
